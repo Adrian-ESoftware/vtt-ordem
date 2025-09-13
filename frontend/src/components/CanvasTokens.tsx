@@ -7,9 +7,10 @@ import type { Token, DragState, CanvasViewport } from '@/types';
 interface CanvasTokensProps {
   tableId: string;
   tokens: Record<string, Token>;
+  roomDoc?: any; // Add roomDoc prop for Yjs integration
 }
 
-export function CanvasTokens({ tableId, tokens }: CanvasTokensProps) {
+export function CanvasTokens({ tableId, tokens, roomDoc }: CanvasTokensProps) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const updateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [localTokens, setLocalTokens] = useState<Record<string, Token>>({});
@@ -25,6 +26,17 @@ export function CanvasTokens({ tableId, tokens }: CanvasTokensProps) {
   });
   const [selectedToken, setSelectedToken] = useState<string | null>(null);
 
+  // Helper to update token position in Yjs
+  const updateTokenInYjs = useCallback((tokenId: string, updates: Partial<Token>) => {
+    if (!roomDoc?.doc) return;
+    
+    const tokensMap = roomDoc.doc.getMap('tokens');
+    const currentToken = tokensMap.get(tokenId) as Token;
+    if (currentToken) {
+      tokensMap.set(tokenId, { ...currentToken, ...updates });
+    }
+  }, [roomDoc]);
+
   // Use Yjs tokens when available, otherwise use local state
   const activeTokens = Object.keys(tokens).length > 0 ? tokens : localTokens;
 
@@ -34,52 +46,56 @@ export function CanvasTokens({ tableId, tokens }: CanvasTokensProps) {
       clearTimeout(updateTimeoutRef.current);
     }
     
-    updateTimeoutRef.current = setTimeout(() => {
-      api.updateToken(tableId, tokenId, updates).catch((error) => {
+    updateTimeoutRef.current = setTimeout(async () => {
+      try {
+        await api.updateToken(tableId, tokenId, updates);
+      } catch (error: any) {
+        // Silently handle "Token not found" errors for local tokens
+        if (error?.status === 404 && error?.message?.includes('Token not found')) {
+          console.warn(`Token ${tokenId} not found on server, skipping update`);
+          return;
+        }
         console.error('Failed to update token:', error);
-      });
+      }
     }, 100);
   }, [tableId]);
 
   // Handle token creation
-  const handleCreateToken = useCallback(async (e: React.MouseEvent) => {
-    if (dragState.isDragging) return;
-
+  const handleCreateToken = useCallback(async () => {
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
 
-    const x = (e.clientX - rect.left - viewport.x) / viewport.zoom;
-    const y = (e.clientY - rect.top - viewport.y) / viewport.zoom;
+    // Create token at center of canvas
+    const x = (rect.width / 2 - viewport.x) / viewport.zoom;
+    const y = (rect.height / 2 - viewport.y) / viewport.zoom;
 
     const colors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
     const color = colors[Math.floor(Math.random() * colors.length)];
 
-    const newToken: Token = {
-      id: `token-${Date.now()}`,
-      name: `Token ${Object.keys(activeTokens).length + 1}`,
-      x,
-      y,
-      color,
-    };
-
-    // Add to local state immediately for responsive UI
-    setLocalTokens(prev => ({
-      ...prev,
-      [newToken.id]: newToken
-    }));
-
     try {
-      await api.createToken(tableId, newToken);
+      // Create token directly on server instead of using temporary local ID
+      const newToken = await api.createToken(tableId, {
+        name: `Token ${Object.keys(activeTokens).length + 1}`,
+        x,
+        y,
+        color,
+      });
+
+      // Add to local state only if using local tokens
+      if (Object.keys(tokens).length === 0) {
+        setLocalTokens(prev => ({
+          ...prev,
+          [newToken.id]: newToken
+        }));
+      } else if (roomDoc?.doc) {
+        // Add to Yjs for real-time sync
+        const tokensMap = roomDoc.doc.getMap('tokens');
+        tokensMap.set(newToken.id, newToken);
+      }
     } catch (error) {
       console.error('Failed to create token:', error);
-      // Remove from local state if API fails
-      setLocalTokens(prev => {
-        const newState = { ...prev };
-        delete newState[newToken.id];
-        return newState;
-      });
     }
-  }, [tableId, activeTokens, dragState.isDragging, viewport]);
+  }, [tableId, activeTokens, viewport, tokens]);
 
   // Handle drag start
   const handleMouseDown = useCallback((e: React.MouseEvent, tokenId: string) => {
@@ -119,7 +135,12 @@ export function CanvasTokens({ tableId, tokens }: CanvasTokensProps) {
       const x = (e.clientX - dragState.offset.x - viewport.x) / viewport.zoom;
       const y = (e.clientY - dragState.offset.y - viewport.y) / viewport.zoom;
 
-      // Update local state immediately for responsive UI
+      // Update Yjs state immediately for responsive UI and real-time sync
+      if (Object.keys(tokens).length > 0 && dragState.draggedToken) {
+        updateTokenInYjs(dragState.draggedToken, { x, y });
+      }
+
+      // Update local state immediately for responsive UI (fallback when no Yjs)
       if (Object.keys(tokens).length === 0 && dragState.draggedToken) {
         setLocalTokens(prev => {
           const tokenId = dragState.draggedToken!;
@@ -157,7 +178,7 @@ export function CanvasTokens({ tableId, tokens }: CanvasTokensProps) {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [dragState, viewport, debouncedUpdateToken]);
+  }, [dragState, viewport, debouncedUpdateToken, updateTokenInYjs, tokens]);
 
   // Handle token deletion
   const handleDeleteToken = useCallback(async (tokenId: string) => {
@@ -174,8 +195,31 @@ export function CanvasTokens({ tableId, tokens }: CanvasTokensProps) {
           delete newState[tokenId];
           return newState;
         });
+      } else if (roomDoc?.doc) {
+        // Remove from Yjs for real-time sync
+        const tokensMap = roomDoc.doc.getMap('tokens');
+        tokensMap.delete(tokenId);
       }
-    } catch (error) {
+    } catch (error: any) {
+      // Handle "Token not found" errors gracefully
+      if (error?.status === 404 && error?.message?.includes('Token not found')) {
+        console.warn(`Token ${tokenId} not found on server, removing from local state`);
+        if (selectedToken === tokenId) {
+          setSelectedToken(null);
+        }
+        if (Object.keys(tokens).length === 0) {
+          setLocalTokens(prev => {
+            const newState = { ...prev };
+            delete newState[tokenId];
+            return newState;
+          });
+        } else if (roomDoc?.doc) {
+          // Remove from Yjs for real-time sync
+          const tokensMap = roomDoc.doc.getMap('tokens');
+          tokensMap.delete(tokenId);
+        }
+        return;
+      }
       console.error('Failed to delete token:', error);
     }
   }, [tableId, selectedToken, tokens]);
@@ -196,11 +240,19 @@ export function CanvasTokens({ tableId, tokens }: CanvasTokensProps) {
           ...updates
         }
       }));
+    } else {
+      // Update Yjs for real-time sync
+      updateTokenInYjs(tokenId, updates);
     }
 
     try {
       await api.updateToken(tableId, tokenId, updates);
-    } catch (error) {
+    } catch (error: any) {
+      // Handle "Token not found" errors gracefully
+      if (error?.status === 404 && error?.message?.includes('Token not found')) {
+        console.warn(`Token ${tokenId} not found on server, keeping local state`);
+        return;
+      }
       console.error('Failed to toggle token lock:', error);
       // Revert local state if API fails
       if (Object.keys(tokens).length === 0) {
@@ -217,11 +269,23 @@ export function CanvasTokens({ tableId, tokens }: CanvasTokensProps) {
 
   return (
     <div className="relative w-full h-full bg-gray-900 overflow-hidden">
+      {/* Create Token Button */}
+      <div className="absolute top-4 left-4 z-10">
+        <button
+          onClick={handleCreateToken}
+          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 shadow-lg"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+          </svg>
+          Criar Token
+        </button>
+      </div>
+
       {/* Canvas */}
       <div
         ref={canvasRef}
-        className="w-full h-full cursor-crosshair"
-        onClick={handleCreateToken}
+        className="w-full h-full"
         style={{
           backgroundImage: `
             radial-gradient(circle, #374151 1px, transparent 1px)
@@ -273,7 +337,7 @@ export function CanvasTokens({ tableId, tokens }: CanvasTokensProps) {
 
       {/* Selected Token Controls */}
       {selectedToken && activeTokens[selectedToken] && (
-        <div className="absolute top-4 left-4 bg-gray-800 border border-gray-600 rounded-lg p-4 min-w-48">
+        <div className="absolute top-16 left-4 bg-gray-800 border border-gray-600 rounded-lg p-4 min-w-48">
           <h3 className="text-sm font-medium text-white mb-2">
             {activeTokens[selectedToken].name}
           </h3>
@@ -309,7 +373,7 @@ export function CanvasTokens({ tableId, tokens }: CanvasTokensProps) {
 
       {/* Instructions */}
       <div className="absolute bottom-4 left-4 bg-black bg-opacity-50 text-white text-xs p-2 rounded">
-        Click to create token • Drag to move • Click token to select
+        Use o botão "Criar Token" • Arraste para mover • Clique no token para selecioná-lo
       </div>
 
       {/* Connection Status */}

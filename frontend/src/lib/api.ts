@@ -41,7 +41,7 @@ export interface TableSnapshot {
 }
 
 class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, message: string, public details?: any) {
     super(message);
     this.name = 'ApiError';
   }
@@ -57,7 +57,22 @@ async function fetchApi<T>(url: string, options: RequestInit = {}): Promise<T> {
   });
 
   if (!response.ok) {
-    throw new ApiError(response.status, `API Error: ${response.statusText}`);
+    let errorMessage = `${response.statusText}`;
+    let details: any = undefined;
+    try {
+      const errorBody = await response.json();
+      if (errorBody.detail) {
+        if (Array.isArray(errorBody.detail)) {
+          errorMessage = errorBody.detail.map((d: any) => d.msg || d.message).join(', ');
+        } else {
+          errorMessage = errorBody.detail;
+        }
+        details = errorBody;
+      }
+    } catch (e) {
+      // If not JSON, keep the default message
+    }
+    throw new ApiError(response.status, errorMessage, details);
   }
 
   return response.json();

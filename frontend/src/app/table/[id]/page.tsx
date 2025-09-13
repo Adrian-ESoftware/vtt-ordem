@@ -139,7 +139,7 @@ export default function TablePage() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold">
-              {tableInfo?.name || `Table ${tableId}`}
+              {`Table ${tableId}`}
             </h1>
             <div className="flex items-center gap-4 mt-2">
               <div className={`flex items-center gap-2 ${roomDoc.isConnected ? 'text-green-400' : 'text-red-400'}`}>
@@ -165,6 +165,7 @@ export default function TablePage() {
           <CanvasTokens 
             tableId={tableId}
             tokens={tokens}
+            roomDoc={roomDoc}
           />
         </div>
 

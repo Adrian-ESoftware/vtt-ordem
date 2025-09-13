@@ -11,7 +11,7 @@ export default function Home() {
         
         <div className="space-y-4">
           <Link 
-            href="/table/test-table"
+            href="/table/1"
             className="inline-block px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
           >
             Join Test Table
